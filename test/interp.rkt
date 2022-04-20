@@ -1,127 +1,143 @@
 #lang racket
-(require "../interp.rkt" rackunit)
+(provide (all-defined-out))
 
-(define (run e)
-  (interp e))
+;; type Value =
+;; | Integer
+;; | Boolean
+;; | Character
+;; | String
+;; | (Box Value)
+;; | (Cons Value Value)
 
-;; Abscond examples
-(check-equal? (run 7) 7)
-(check-equal? (run -8) -8)
+;; type Answer = Value | 'err
 
-;; Blackmail examples
-(check-equal? (run '(add1 (add1 7))) 9)
-(check-equal? (run '(add1 (sub1 7))) 7)
+;; type REnv = (Listof (List Variable Value))
 
-;; Con examples
-(check-equal? (run '(if (zero? 0) 1 2)) 1)
-(check-equal? (run '(if (zero? 1) 1 2)) 2)
-(check-equal? (run '(if (zero? -7) 1 2)) 2)
-(check-equal? (run '(if (zero? 0)
-                        (if (zero? 1) 1 2)
-                        7))
-              2)
-(check-equal? (run '(if (zero? (if (zero? 0) 1 0))
-                        (if (zero? 1) 1 2)
-                        7))
-              7)
+;; Expr -> Answer
+(define (interp e)
+  (interp-env e '()))
 
-;; Con+ examples
-(check-equal? (run '(abs 10)) 10)
-(check-equal? (run '(abs -10)) 10)
-(check-equal? (run '(- 10)) -10)
-(check-equal? (run '(- -10)) 10)
-(check-equal? (run '(- (- 10))) 10)
-(check-equal? (run '(cond [else 5])) 5)
-(check-equal? (run '(cond [(zero? 1) 2] [else 3])) 3)
-(check-equal? (run '(cond [(zero? 0) 2] [else 3])) 2)
-(check-equal? (run '(cond [(zero? 1) 2] [(zero? (sub1 1)) 4] [else 3])) 4)
+;; Expr REnv -> Answer
+(define (interp-env e r)
+  (match e
+    [(? value? v) v]
+    [''() '()]
+    [(list (? prim? p) es ...)
+     (let ((as (interp-env* es r)))
+       (interp-prim p as))]    
+    [`(if ,e0 ,e1 ,e2)
+     (match (interp-env e0 r)
+       ['err 'err]
+       [v
+        (if v
+            (interp-env e1 r)
+            (interp-env e2 r))])]
+    [(? symbol? x)
+     (lookup r x)]
+    [`(let ,(list `(,xs ,es) ...) ,e)
+     (match (interp-env* es r)
+       ['err 'err]
+       [vs
+        (interp-env e (append (zip xs vs) r))])]
+    [(list 'cond cs ... `(else ,en))
+     (interp-cond-env cs en r)]))
 
-;; Dupe examples
-(check-equal? (run '(if #t 3 4)) 3)
-(check-equal? (run '(if #f 3 4)) 4)
-(check-equal? (run '(if  0 3 4)) 3)
-(check-equal? (run '(zero? 4)) #f)
-(check-equal? (run '(zero? 0)) #t)
+;; (Listof Expr) REnv -> (Listof Value) | 'err
+(define (interp-env* es r)
+  (match es
+    ['() '()]
+    [(cons e es)
+     (match (interp-env e r)
+       ['err 'err]
+       [v (cons v (interp-env* es r))])]))
 
-;; Dupe+ examples
-(check-equal? (run '(cond [#t 2] [else 3])) 2)
-(check-equal? (run '(cond [#f 2] [else 3])) 3)
-(check-equal? (run '(cond [1 2] [else 3])) 2)
-(check-equal? (run '(cond [#f 2] [#t 4] [else 3])) 4)
-(check-equal? (run '(cond [#t 2] [#f 4] [else 3])) 2)
-(check-equal? (run '(cond [#t 2] [#f (add1 #f)] [else 3])) 2)
+;; (Listof (List Expr Expr)) Expr REnv -> Answer
+(define (interp-cond-env cs en r)
+  (match cs
+    ['() (interp-env en r)]
+    [(cons `(,eq ,ea) cs)
+     (match (interp-env eq r)
+       ['err 'err]
+       [v
+        (if v
+            (interp-env ea r)
+            (interp-cond-env cs en r))])]))
 
-;; Extort examples
-(check-equal? (run '(zero? #t)) 'err)
-(check-equal? (run '(zero? #f)) 'err)
-(check-equal? (run '(add1 #f)) 'err)
-(check-equal? (run '(if (add1 #f) 1 2)) 'err)
+;; Any -> Boolean
+(define (prim? x)
+  (and (symbol? x)
+       (memq x '(add1 sub1 zero? abs - char? boolean? integer? integer->char char->integer
+                      string? box? empty? cons cons? box unbox car cdr string-length
+                      make-string string-ref = < <= char=? boolean=? +))))
 
-;; Extort+ examples
-(check-equal? (run '(abs #f)) 'err)
-(check-equal? (run '(cond [(add1 #f) 1] [else 2])) 'err)
+;; Any -> Boolean
+(define (value? x)
+  (or (integer? x)
+      (boolean? x)
+      (char? x)
+      (string? x)))
 
-;; Fraud examples
-(check-equal? (run '(let ((x 7)) x)) 7)
-(check-equal? (run '(let ((x 7)) 2)) 2)
-(check-equal? (run '(let ((x 7)) (add1 x))) 8)
-(check-equal? (run '(let ((x (add1 7))) x)) 8)
-(check-equal? (run '(let ((x 7)) (let ((y 2)) x))) 7)
-(check-equal? (run '(let ((x 7)) (let ((x 2)) x))) 2)
-(check-equal? (run '(let ((x 7)) (let ((x (add1 x))) x))) 8)
-(check-equal? (run '(let ((x (add1 #f))) 0)) 'err)
+;; Prim (Listof Answer) -> Answer
+(define (interp-prim p as)
+  (match (cons p as)
+    [(list p (? value?) ... 'err _ ...) 'err]
+    [(list '- (? integer? i0)) (- i0)]
+    [(list '- (? integer? i0) (? integer? i1)) (- i0 i1)]
+    [(list 'abs (? integer? i0)) (abs i0)]
+    [(list 'add1 (? integer? i0)) (+ i0 1)]
+    [(list 'sub1 (? integer? i0)) (- i0 1)]
+    [(list 'zero? (? integer? i0)) (zero? i0)]
+    [(list 'char? v0) (char? v0)]
+    [(list 'integer? v0) (integer? v0)]
+    [(list 'boolean? v0) (boolean? v0)]
+    [(list 'integer->char (? codepoint? i0)) (integer->char i0)]
+    [(list 'char->integer (? char? c)) (char->integer c)]
+    [(list '+ (? integer? i0) (? integer? i1)) (+ i0 i1)]
+    [(list 'cons v0 v1) (cons v0 v1)]
+    [(list 'car (? cons? v0)) (car v0)]
+    [(list 'cdr (? cons? v0)) (cdr v0)]
+    [(list 'string? v0) (string? v0)]
+    [(list 'box? v0) (box? v0)]
+    [(list 'empty? v0) (empty? v0)]
+    [(list 'cons? v0) (cons? v0)]
+    [(list 'cons v0 v1) (cons v0 v1)]
+    [(list 'box v0) (box v0)]
+    [(list 'unbox (? box? v0)) (unbox v0)]
+    [(list 'string-length (? string? v0)) (string-length v0)]
+    [(list 'make-string (? natural? v0) (? char? v1)) (make-string v0 v1)]
+    [(list 'string-ref (? string? v0) (? natural? v1))
+     (if (< v1 (string-length v0))
+         (string-ref v0 v1)
+         'err)]
+    [(list '= (? integer? v0) (? integer? v1)) (= v0 v1)]
+    [(list '< (? integer? v0) (? integer? v1)) (< v0 v1)]
+    [(list '<= (? integer? v0) (? integer? v1)) (<= v0 v1)]
+    [(list 'char=? (? char? v0) (? char? v1)) (char=? v0 v1)]
+    [(list 'boolean=? (? boolean? v0) (? boolean? v1)) (boolean=? v0 v1)]    
+    [_ 'err]))
 
-;; Fraud+ examples
-(check-equal? (run '(let () 7)) 7)
-(check-equal? (run '(let ((x 7) (y 8)) 2)) 2)
-(check-equal? (run '(let ((x 7) (y 8)) (add1 x))) 8)
-(check-equal? (run '(let ((x 7) (y 8)) (add1 y))) 9)
-(check-equal? (run '(let ((x (add1 7)) (y 0)) y)) 0)
-(check-equal? (run '(let ((x 7) (z 9)) (let ((y 2)) x))) 7)
-(check-equal? (run '(let ((x 7) (z 9)) (let ((x 2)) x))) 2)
-(check-equal? (run '(let ((x 7) (z 9)) (let ((x (add1 x)) (z z)) x))) 8)
-(check-equal? (run '(let ((x (add1 #f)) (z 9)) x)) 'err)
-(check-equal? (run '(char? #\a)) #t)
-(check-equal? (run '(integer? #\a)) #f)
-(check-equal? (run '(boolean? #\a)) #f)
-(check-equal? (run '(char? 4)) #f)
-(check-equal? (run '(integer? 4)) #t)
-(check-equal? (run '(boolean? 4)) #f)
-(check-equal? (run '(char? #f)) #f)
-(check-equal? (run '(integer? #f)) #f)
-(check-equal? (run '(boolean? #t)) #t)
-(check-equal? (run '(char->integer #\a)) 97)
-(check-equal? (run '(integer->char 97)) #\a)
-(check-equal? (run '(integer->char #\a)) 'err)
+;; REnv Variable -> Answer
+(define (lookup env x)
+  (match env
+    ['() 'err]
+    [(cons (list y v) env)
+     (match (symbol=? x y)
+       [#t v]
+       [#f (lookup env x)])]))
 
-;; Grift examples
-(check-equal? (run '(+ 3 4)) 7)
-(check-equal? (run '(- 3 4)) -1)
-(check-equal? (run '(+ (+ (+ 1 2) (+ 3 4))
-                       (+ (+ 5 6) (+ 7 8))))
-              36)
+;; REnv Variable Value -> Value
+(define (ext r x v)
+  (cons (list x v) r))
 
-;; Hustle examples
-(check-equal? (run ''()) '())
-(check-equal? (run '(cons 1 (cons 2 (cons 3 '())))) '(1 2 3))
-(check-equal? (run '(cons 1 (cons 2 (cons 3 4)))) '(1 2 3 . 4))
-(check-equal? (run '(car (cons 1 2))) 1)
-(check-equal? (run '(cdr (cons 1 2))) 2)
-(check-equal? (run '(box 8)) '#&8)
-(check-equal? (run '(unbox (box 8))) 8)
-(check-equal? (run '(unbox (unbox (box (box 8))))) 8)
+;; Any -> Boolean
+(define (codepoint? x)
+  (and (integer? x)
+       (<= 0 x #x10FFFF)
+       (not (<= #xD800 x #xDFFF))))
 
-;; Hustle+ examples
-(check-equal? (run "abcd") "abcd")
-(check-equal? (run "") "")
-(check-equal? (run '(string? "")) #t)
-(check-equal? (run '(string? #\a)) #f)
-(check-equal? (run '(string-ref "abc" 0)) #\a)
-(check-equal? (run '(string-ref "abc" 1)) #\b)
-(check-equal? (run '(string-ref "abc" 2)) #\c)
-(check-equal? (run '(string-length "")) 0)
-(check-equal? (run '(string-length "abc")) 3)
-(check-equal? (run '(string-ref #f 0)) 'err)
-(check-equal? (run '(string-ref "" #f)) 'err)
-(check-equal? (run '(string-ref "abc" -1)) 'err)
-(check-equal? (run '(string-ref "abc" 3)) 'err)
+;; (Listof A) (Listof B) -> (Listof (List A B))
+(define (zip xs ys)
+  (match* (xs ys)
+    [('() '()) '()]
+    [((cons x xs) (cons y ys))
+     (cons (list x y) (zip xs ys))]))
